@@ -12,6 +12,7 @@ import numpy as np
 
 from config import Config
 from performance import PerformanceSession
+from text_reconstructor import TextReconstructor
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,7 @@ class OCRService:
         self.config, self.logger = config, logger
         self._reader: Any | None = None
         self._debug_result_logged = False
+        self._reconstructor = TextReconstructor()
 
     def initialize(self) -> bool:
         """Load EasyOCR in configured CPU/GPU mode without terminating the app."""
@@ -72,7 +74,11 @@ class OCRService:
                                     canvas_size=self.config.easyocr_canvas_size)
         self._log_first_response(raw)
         normalized = [result for result in (self._normalize_item(item) for item in self._as_items(raw)) if result and result.text]
-        text = "\n".join(item.text for item in normalized)
+        raw_text = "\n".join(item.text for item in normalized)
+        text = self._reconstructor.reconstruct(normalized) or raw_text
+        if self.config.debug_mode:
+            self.logger.info("===== OCR RAW =====\n%s\n===== RECONSTRUCTED =====\n%s",
+                             raw_text, text)
         average = sum(item.confidence for item in normalized) / len(normalized) if normalized else 0.0
         return OCRResult(normalized, text, average, method, low_confidence_words=self._low_words(normalized))
 
@@ -115,7 +121,9 @@ class OCRService:
             merged_text, merged_confidence, low_words = self._merge_words(results, selected)
         self.logger.info("Selected OCR variant: %s (confidence=%.3f)", selected.method, selected.average_confidence)
         all_variants = {result.method: result.items for result in results}
-        return OCRResult(selected.items, merged_text, merged_confidence, selected.method, scores, low_words,
+        # The selected variant supplies consistent geometry. Confidence/low-word
+        # evidence still benefits from the ensemble, while text remains spatially reconstructed.
+        return OCRResult(selected.items, selected.text, merged_confidence, selected.method, scores, low_words,
                          all_variants)
 
     def _save_variant_results(self, results: list[OCRResult]) -> None:

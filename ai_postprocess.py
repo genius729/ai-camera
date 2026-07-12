@@ -98,25 +98,13 @@ class AIProcessor:
 
     @staticmethod
     def _build_prompt(result: OCRResult) -> str:
-        """Serialize every OCR variant, region confidence, box, and method for Gemini."""
-        variants: list[dict[str, object]] = []
-        for method, items in result.variants.items():
-            variants.append({
-                "preprocessing": method,
-                "average_confidence": result.variant_scores.get(method, (0.0, 0, 0))[0],
-                "regions": [{
-                    "text": item.text,
-                    "confidence": item.confidence,
-                    "confidence_level": AIProcessor._confidence_level(item.confidence),
-                    "bounding_box": item.box,
-                } for item in items],
-            })
+        """Send only spatially reconstructed text, never fragmented OCR regions."""
         evidence = {
             "selected_preprocessing": result.method,
-            "selected_merged_ocr": result.text,
+            "reconstructed_ocr_paragraph": result.text,
             "selected_average_confidence": result.average_confidence,
             "very_low_confidence_words": result.low_confidence_words,
-            "all_ocr_results": variants,
+            "ensemble_scores": result.variant_scores,
         }
         return SYSTEM_RULES + "\nOCR 증거(JSON):\n" + json.dumps(evidence, ensure_ascii=False, indent=2)
 
