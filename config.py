@@ -40,6 +40,7 @@ class Config:
     ocr_languages: tuple[str, ...] = ("ko", "en")
     ocr_gpu: bool = False
     ocr_upscale_factor: int = 3
+    easyocr_canvas_size: int = 2560
     superres_model_path: Path = field(default_factory=lambda: Path("models/FSRCNN_x3.pb"))
     debug_mode: bool = DEBUG_MODE  # Modified: controls diagnostic log output.
     tts_rate: int = 165
@@ -52,7 +53,7 @@ class Config:
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
-    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-3.0-flash")
+    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
     ai_max_change_ratio: float = 0.55
     ai_min_length_ratio: float = 0.45
     ai_max_length_ratio: float = 1.60

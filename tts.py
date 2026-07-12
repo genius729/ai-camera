@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from config import Config
+from performance import PerformanceSession
 
 
 class TTSPlayer:
@@ -30,7 +31,7 @@ class TTSPlayer:
                          self.config.tts_backend, self._owner_thread)
         return True
 
-    def speak(self, text: str) -> None:
+    def speak(self, text: str, performance: PerformanceSession | None = None) -> None:
         """Speak synchronously in the TTS worker without calling any OpenCV API."""
         if not text or self._stop_requested.is_set():
             return
@@ -38,11 +39,15 @@ class TTSPlayer:
             raise RuntimeError("TTSPlayer.speak() must run on its owning TTS thread")
         if self.config.tts_backend == "edge":
             try:
-                self._speak_edge(text)
+                self._speak_edge(text, performance)
                 return
             except Exception:
                 self.logger.exception("Edge-TTS failed; falling back to local pyttsx3")
-        self._speak_pyttsx3(text)
+        if performance:
+            with performance.measure("Audio Play"):
+                self._speak_pyttsx3(text)
+        else:
+            self._speak_pyttsx3(text)
 
     def stop(self) -> None:
         """Request cancellation and stop active Windows audio playback."""
@@ -68,7 +73,7 @@ class TTSPlayer:
         self.stop()
         self._engine = None
 
-    def _speak_edge(self, text: str) -> None:
+    def _speak_edge(self, text: str, performance: PerformanceSession | None = None) -> None:
         """Generate an Edge-TTS MP3 and play it in the worker thread."""
         import edge_tts
 
@@ -76,11 +81,21 @@ class TTSPlayer:
         try:
             with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as temporary:
                 path = Path(temporary.name)
-            communicate = edge_tts.Communicate(text, self.config.edge_tts_voice,
-                                                rate=self.config.edge_tts_rate)
-            asyncio.run(communicate.save(str(path)))
+            if performance:
+                with performance.measure("TTS Generate"):
+                    communicate = edge_tts.Communicate(text, self.config.edge_tts_voice,
+                                                        rate=self.config.edge_tts_rate)
+                    asyncio.run(communicate.save(str(path)))
+            else:
+                communicate = edge_tts.Communicate(text, self.config.edge_tts_voice,
+                                                    rate=self.config.edge_tts_rate)
+                asyncio.run(communicate.save(str(path)))
             if not self._stop_requested.is_set():
-                self._play_mp3_windows(path)  # Modified: use the built-in Windows API.
+                if performance:
+                    with performance.measure("Audio Play"):
+                        self._play_mp3_windows(path)
+                else:
+                    self._play_mp3_windows(path)
         finally:
             if path is not None:
                 try:

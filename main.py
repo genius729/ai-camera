@@ -18,6 +18,7 @@ from camera import Camera
 from config import CONFIG, Config
 from ocr import OCRResult, OCRService
 from preprocess import ImagePreprocessor
+from performance import PerformanceSession
 from quality import QualityAssessor, QualityResult
 from tts import TTSPlayer
 from utils import ensure_directories, setup_logging, timed
@@ -42,6 +43,7 @@ class CaptureJob:
 
     job_id: int
     frame: np.ndarray
+    performance: PerformanceSession
 
 
 @dataclass(frozen=True)
@@ -52,6 +54,7 @@ class AIJob:
     result: OCRResult
     selected_image: np.ndarray
     quality: QualityResult
+    performance: PerformanceSession
 
 
 @dataclass(frozen=True)
@@ -60,6 +63,7 @@ class TTSJob:
 
     job_id: int
     text: str
+    performance: PerformanceSession
 
 
 @dataclass(frozen=True)
@@ -195,13 +199,15 @@ class AsyncReadingAssistant:
         """Clone once and share that exact frame with both Freeze UI and OCR."""
         if not self.state.accepts_capture():
             return
-        captured_frame = frame.copy()
         with self._job_lock:
             self._next_job_id += 1
             job_id = self._next_job_id
             self._active_job_id = job_id
+        performance = PerformanceSession(job_id, self.logger)
+        with performance.measure("Camera Capture"):
+            captured_frame = frame.copy()
         try:
-            self.capture_queue.put_nowait(CaptureJob(job_id, captured_frame))
+            self.capture_queue.put_nowait(CaptureJob(job_id, captured_frame, performance))
             self.state.begin_capture(captured_frame)
         except queue.Full:
             with self._job_lock:
@@ -235,7 +241,9 @@ class AsyncReadingAssistant:
 
     def _ocr_worker(self) -> None:
         """Consume captures and perform quality assessment, preprocessing, and EasyOCR."""
-        ocr_initialized = False
+        # Begin the expensive model load at application startup so the first
+        # shutter press does not pay the complete cold-start cost.
+        ocr_initialized = self.ocr.initialize()
         while not self.stop_event.is_set():
             try:
                 job = self.capture_queue.get(timeout=0.2)
@@ -254,10 +262,12 @@ class AsyncReadingAssistant:
                         continue
                 if self._is_cancelled(job.job_id):
                     continue
-                if self.camera.save_capture(job.frame) is None:
+                with job.performance.measure("Camera Capture"):
+                    saved_capture = self.camera.save_capture(job.frame)
+                if saved_capture is None:
                     self._queue_guidance(job.job_id, "사진 저장에 실패했습니다. 다시 촬영해주세요.")
                     continue
-                with timed(self.logger, "Capture quality assessment"):
+                with job.performance.measure("Quality Check"):
                     quality = self.quality.assess(job.frame)
                 self.state.set_quality(quality)
                 if self._is_cancelled(job.job_id):
@@ -266,16 +276,14 @@ class AsyncReadingAssistant:
                     self.state.transition(AppState.ERROR, quality.message)
                     self._queue_guidance(job.job_id, quality.message)
                     continue
-                with timed(self.logger, "Document detection and preprocessing"):
-                    variants = self.processor.process(job.frame)
+                variants = self.processor.process(job.frame, job.performance)
                 if self._is_cancelled(job.job_id):
                     continue
                 if not self.ocr.has_text(variants["Gray"]):
                     self._queue_guidance(job.job_id, "텍스트를 찾지 못했습니다.")
                     continue
                 self.state.transition(AppState.OCR, "문자 인식 중")
-                with timed(self.logger, "Eight-variant EasyOCR"):
-                    result = self.ocr.recognize_variants(variants)
+                result = self.ocr.recognize_variants(variants, job.performance)
                 if self._is_cancelled(job.job_id):
                     continue
                 selected_image = variants.get(result.method, variants["Gray"])
@@ -283,7 +291,8 @@ class AsyncReadingAssistant:
                 if not self.ocr.is_acceptable(result):
                     self._queue_guidance(job.job_id, "다시 촬영해주세요.")
                     continue
-                self.ai_queue.put(AIJob(job.job_id, result, selected_image, quality), timeout=1.0)
+                self.ai_queue.put(AIJob(job.job_id, result, selected_image, quality,
+                                        job.performance), timeout=1.0)
             except queue.Full:
                 self.logger.error("AI work queue is full")
                 if not self._is_cancelled(job.job_id):
@@ -307,12 +316,11 @@ class AsyncReadingAssistant:
                 if self._is_cancelled(job.job_id):
                     continue
                 self.state.transition(AppState.AI, "인공지능 문장 복원 중")
-                with timed(self.logger, "Gemini OCR restoration and validation"):
-                    corrected = self.ai.correct(job.result)
+                corrected = self.ai.correct(job.result, job.performance)
                 if self._is_cancelled(job.job_id):
                     continue
                 self.logger.info("Final TTS text: %s", corrected)
-                self.tts_queue.put(TTSJob(job.job_id, corrected), timeout=1.0)
+                self.tts_queue.put(TTSJob(job.job_id, corrected, job.performance), timeout=1.0)
             except queue.Full:
                 self.logger.error("TTS work queue is full")
                 if not self._is_cancelled(job.job_id):
@@ -344,7 +352,10 @@ class AsyncReadingAssistant:
                         continue
                     player.reset_stop()
                     self.state.transition(AppState.TTS, "음성 출력 중")
-                    player.speak(job.text)
+                    player.speak(job.text, job.performance)
+                    report = job.performance.report()
+                    self.logger.info("\n%s", report)
+                    print(report, flush=True)
                     if not self.stop_event.is_set() and not self._is_cancelled(job.job_id):
                         self._complete_job(job.job_id)
                 except Exception:
@@ -362,7 +373,10 @@ class AsyncReadingAssistant:
         text = f"{guidance} {followup}".strip()
         try:
             if not self._is_cancelled(job_id):
-                self.tts_queue.put(TTSJob(job_id, text), timeout=1.0)
+                # Guidance jobs originate in the capture worker and do not have a full
+                # successful-pipeline report, so use a new session for TTS diagnostics.
+                self.tts_queue.put(TTSJob(job_id, text,
+                                          PerformanceSession(job_id, self.logger)), timeout=1.0)
         except queue.Full:
             self.logger.error("Could not enqueue TTS guidance")
             self.state.transition(AppState.ERROR, guidance)

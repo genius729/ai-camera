@@ -3,12 +3,18 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from contextlib import nullcontext
 
 import cv2
 import numpy as np
 
 from config import Config
 from utils import save_debug_image
+from performance import PerformanceSession
+
+
+def _null_measure(_name: str):
+    return nullcontext()
 
 
 class ImagePreprocessor:
@@ -17,12 +23,27 @@ class ImagePreprocessor:
     def __init__(self, config: Config, logger: logging.Logger) -> None:
         self.config, self.logger = config, logger
 
-    def process(self, source: np.ndarray) -> dict[str, np.ndarray]:
+    def process(self, source: np.ndarray, performance: PerformanceSession | None = None) -> dict[str, np.ndarray]:
         """Return eight deskewed OCR variants, saving all diagnostic images."""
-        document = self._detect_and_rectify(source)
-        save_debug_image(self.config.debug_dir / "01_document_detect.jpg", document, self.logger)
-        enlarged = self._upscale(document)
-        deskewed = self._deskew(enlarged)
+        measure = performance.measure if performance else _null_measure
+        with measure("Document Detection"):
+            corners = self._detect_document(source)
+        with measure("Perspective Transform"):
+            document = self._four_point_transform(source, corners) if corners is not None else source
+        with measure("Upscale"):
+            enlarged = self._upscale(document)
+        with measure("Preprocess"):
+            deskewed = self._deskew(enlarged)
+            variants = self._create_variants(deskewed)
+        if self.config.debug_mode:
+            save_debug_image(self.config.debug_dir / "01_document_detect.jpg", document, self.logger)
+            for index, (name, image) in enumerate(variants.items(), start=1):
+                safe_name = name.lower().replace(" + ", "_").replace(" ", "_")
+                save_debug_image(self.config.debug_dir / f"{index + 1:02d}_{safe_name}.jpg", image, self.logger)
+            save_debug_image(self.config.debug_dir / "final_ocr_input.jpg", variants["Gray"], self.logger)
+        return variants
+
+    def _create_variants(self, deskewed: np.ndarray) -> dict[str, np.ndarray]:
         gray = cv2.cvtColor(deskewed, cv2.COLOR_BGR2GRAY)
         clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8)).apply(gray)
         bilateral = cv2.bilateralFilter(clahe, 9, 70, 70)
@@ -32,7 +53,7 @@ class ImagePreprocessor:
         otsu = cv2.threshold(clean, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
         sharpen = cv2.filter2D(clean, -1, np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]]))
         sharp_threshold = cv2.threshold(sharpen, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-        variants = {
+        return {
             "Original": deskewed,
             "Gray": gray,
             "CLAHE": clahe,
@@ -42,16 +63,17 @@ class ImagePreprocessor:
             "Sharpen": sharpen,
             "Sharpen + Threshold": sharp_threshold,
         }
-        for index, (name, image) in enumerate(variants.items(), start=1):
-            safe_name = name.lower().replace(" + ", "_").replace(" ", "_")
-            save_debug_image(self.config.debug_dir / f"{index + 1:02d}_{safe_name}.jpg", image, self.logger)
-        save_debug_image(self.config.debug_dir / "final_ocr_input.jpg", gray, self.logger)
-        return variants
 
     def _upscale(self, image: np.ndarray) -> np.ndarray:
-        """Use an available DNN super-resolution model, else cubic 3x enlargement."""
+        """Enlarge only to EasyOCR's effective input limit."""
+        largest_dimension = max(image.shape[:2])
+        factor = min(float(self.config.ocr_upscale_factor),
+                     self.config.easyocr_canvas_size / largest_dimension)
+        if factor <= 1.0:
+            return image
         model = self.config.root_dir / self.config.superres_model_path
-        if hasattr(cv2, "dnn_superres") and model.is_file():
+        if (factor == self.config.ocr_upscale_factor
+                and hasattr(cv2, "dnn_superres") and model.is_file()):
             try:
                 superres = cv2.dnn_superres.DnnSuperResImpl_create()
                 superres.readModel(str(model))
@@ -59,12 +81,11 @@ class ImagePreprocessor:
                 return superres.upsample(image)
             except cv2.error:
                 self.logger.warning("Super-resolution unavailable; using INTER_CUBIC", exc_info=True)
-        return cv2.resize(image, None, fx=self.config.ocr_upscale_factor,
-                          fy=self.config.ocr_upscale_factor, interpolation=cv2.INTER_CUBIC)
+        return cv2.resize(image, None, fx=factor, fy=factor, interpolation=cv2.INTER_CUBIC)
 
     @staticmethod
-    def _detect_and_rectify(image: np.ndarray) -> np.ndarray:
-        """Find the largest quadrilateral and apply perspective rectification."""
+    def _detect_document(image: np.ndarray) -> np.ndarray | None:
+        """Find and return the largest document quadrilateral."""
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         edges = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 50, 150)
         contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
@@ -74,8 +95,8 @@ class ImagePreprocessor:
                 break
             corners = cv2.approxPolyDP(contour, 0.02 * cv2.arcLength(contour, True), True)
             if len(corners) == 4:
-                return ImagePreprocessor._four_point_transform(image, corners.reshape(4, 2).astype(np.float32))
-        return image
+                return corners.reshape(4, 2).astype(np.float32)
+        return None
 
     @staticmethod
     def _four_point_transform(image: np.ndarray, points: np.ndarray) -> np.ndarray:

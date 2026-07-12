@@ -8,6 +8,7 @@ from difflib import SequenceMatcher
 
 from config import Config
 from ocr import OCRResult
+from performance import PerformanceSession
 
 
 SYSTEM_RULES = """당신은 OCR 문서 복원 전문가입니다.
@@ -35,24 +36,38 @@ class AIProcessor:
     def __init__(self, config: Config, logger: logging.Logger) -> None:
         self.config, self.logger = config, logger
 
-    def correct(self, result: OCRResult) -> str:
+    def correct(self, result: OCRResult, performance: PerformanceSession | None = None) -> str:
         """Restore OCR with Gemini and validate the response against selected OCR text."""
         fallback = self._normalize(result.text)
         if not self.config.use_ai or not fallback:
             return fallback
-        prompt = self._build_prompt(result)
+        if performance:
+            with performance.measure("AI Postprocess"):
+                prompt = self._build_prompt(result)
+        else:
+            prompt = self._build_prompt(result)
         self.logger.info("Gemini input: %s", prompt)
         try:
             if self.config.ai_provider == "gemini" and self.config.gemini_api_key:
-                candidate = self._gemini(prompt)
+                if performance:
+                    with performance.measure("Gemini API"):
+                        candidate = self._gemini(prompt)
+                else:
+                    candidate = self._gemini(prompt)
             elif self.config.openai_api_key:
                 candidate = self._openai(prompt)
             else:
                 self.logger.warning("No Gemini API key configured; using normalized OCR")
                 return fallback
-            candidate = self._normalize(candidate)
+            if performance:
+                with performance.measure("AI Postprocess"):
+                    candidate = self._normalize(candidate)
+                    valid = self._is_valid_response(fallback, candidate)
+            else:
+                candidate = self._normalize(candidate)
+                valid = self._is_valid_response(fallback, candidate)
             self.logger.info("Gemini output: %s", candidate)
-            if not self._is_valid_response(fallback, candidate):
+            if not valid:
                 self.logger.warning("Gemini output rejected by restoration guard; using OCR source")
                 return fallback
             return candidate

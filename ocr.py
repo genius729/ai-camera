@@ -11,6 +11,7 @@ import cv2
 import numpy as np
 
 from config import Config
+from performance import PerformanceSession
 
 
 @dataclass(frozen=True)
@@ -65,16 +66,36 @@ class OCRService:
         """Recognize one image while retaining text, boxes, and confidences."""
         if self._reader is None:
             raise RuntimeError("OCR service is not initialized")
-        raw = self._reader.readtext(image, detail=1, paragraph=True)
+        # paragraph=False retains EasyOCR's real per-region confidence.  With
+        # paragraph=True EasyOCR omits it and the old normalizer assigned 1.0.
+        raw = self._reader.readtext(image, detail=1, paragraph=False,
+                                    canvas_size=self.config.easyocr_canvas_size)
         self._log_first_response(raw)
         normalized = [result for result in (self._normalize_item(item) for item in self._as_items(raw)) if result and result.text]
         text = "\n".join(item.text for item in normalized)
         average = sum(item.confidence for item in normalized) / len(normalized) if normalized else 0.0
         return OCRResult(normalized, text, average, method, low_confidence_words=self._low_words(normalized))
 
-    def recognize_variants(self, variants: dict[str, np.ndarray]) -> OCRResult:
+    def recognize_variants(self, variants: dict[str, np.ndarray],
+                           performance: PerformanceSession | None = None) -> OCRResult:
         """OCR all variants, select the best score, and merge highest-confidence words."""
-        results = [self.recognize(image, method) for method, image in variants.items()]
+        results = []
+        for method, image in variants.items():
+            if performance:
+                with performance.measure("EasyOCR"):
+                    results.append(self.recognize(image, method))
+            else:
+                results.append(self.recognize(image, method))
+            # A trustworthy Original result needs no rescue ensemble.  When it
+            # is weak, retain the complete eight-variant accuracy fallback.
+            if len(results) == 1 and self.is_acceptable(results[0]):
+                first = results[0]
+                scores = {first.method: (first.average_confidence,
+                                         self._character_count(first.text), len(first.text))}
+                self.logger.info("OCR fast path: Original passed confidence/length thresholds")
+                return OCRResult(first.items, first.text, first.average_confidence, first.method,
+                                 scores, first.low_confidence_words,
+                                 {first.method: first.items})
         if not results:
             return OCRResult([], "", 0.0)
         scores = {result.method: (result.average_confidence, self._character_count(result.text), len(result.text))
@@ -85,8 +106,13 @@ class OCRService:
             self.logger.info("OCR variant text [%s]: %s", method, variant.text)
         if self.config.debug_mode:
             self._save_variant_results(results)
-        selected = max(results, key=lambda value: scores[value.method])
-        merged_text, merged_confidence, low_words = self._merge_words(results, selected)
+        if performance:
+            with performance.measure("OCR Merge"):
+                selected = max(results, key=lambda value: scores[value.method])
+                merged_text, merged_confidence, low_words = self._merge_words(results, selected)
+        else:
+            selected = max(results, key=lambda value: scores[value.method])
+            merged_text, merged_confidence, low_words = self._merge_words(results, selected)
         self.logger.info("Selected OCR variant: %s (confidence=%.3f)", selected.method, selected.average_confidence)
         all_variants = {result.method: result.items for result in results}
         return OCRResult(selected.items, merged_text, merged_confidence, selected.method, scores, low_words,
