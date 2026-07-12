@@ -30,6 +30,13 @@ class Config:
     min_text_regions: int = 4
     min_ocr_confidence: float = 0.50
     min_ocr_characters: int = 20
+    blur_min_variance: float = 100.0
+    brightness_min: float = 45.0
+    brightness_max: float = 220.0
+    document_min_area_ratio: float = 0.20
+    perspective_max_angle_deviation: float = 18.0
+    text_min_median_height: float = 10.0
+    quality_min_component_count: int = 4
     ocr_languages: tuple[str, ...] = ("ko", "en")
     ocr_gpu: bool = False
     ocr_upscale_factor: int = 3
@@ -37,12 +44,19 @@ class Config:
     debug_mode: bool = DEBUG_MODE  # Modified: controls diagnostic log output.
     tts_rate: int = 165
     tts_voice_gender: str = "female"  # "female", "male", or "default"
+    tts_backend: str = os.getenv("TTS_BACKEND", "edge").lower()
+    edge_tts_voice: str = os.getenv("EDGE_TTS_VOICE", "ko-KR-SunHiNeural")
+    edge_tts_rate: str = os.getenv("EDGE_TTS_RATE", "+0%")
     use_ai: bool = True
     ai_provider: str = os.getenv("AI_PROVIDER", "gemini").lower()
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
     gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-3.0-flash")
+    ai_max_change_ratio: float = 0.55
+    ai_min_length_ratio: float = 0.45
+    ai_max_length_ratio: float = 1.60
+    worker_queue_size: int = 2
 
     def __post_init__(self) -> None:
         """Derive data folders from the project root."""

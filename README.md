@@ -25,11 +25,19 @@ OPENAI_MODEL=gpt-4.1-mini
 
 # OCR 원문, 신뢰도, AI/TTS 텍스트, 처리 시간을 logs/에 자세히 기록
 DEBUG_MODE=true
+
+# 비동기 TTS: Edge-TTS를 우선 사용하고 실패하면 pyttsx3로 자동 전환
+TTS_BACKEND=edge
+EDGE_TTS_VOICE=ko-KR-SunHiNeural
+EDGE_TTS_RATE=+0%
 ```
 
 ## 조작
 
 - `SPACE`: 현재 카메라 프레임 촬영
 - `ESC`: 촬영 대기 중 프로그램 종료, 음성 재생 중 즉시 중단
+
+OpenCV 미리보기는 메인 스레드에서 계속 실행되며 OCR, Gemini, TTS는 각각 독립된 큐 워커에서 처리됩니다. 처리 중에도 창의 Windows 메시지 루프가 유지됩니다.
+SPACE를 누른 순간의 프레임은 복사되어 화면에 고정되며, OCR·Gemini·TTS가 모두 끝난 뒤 READY 상태에서 실시간 미리보기가 자동으로 재개됩니다. 처리 중 ESC를 누르면 현재 결과를 폐기하고 READY로 돌아갑니다.
 
 `captures/`, `debug/`, `logs/`는 첫 실행 시 자동으로 생성됩니다. EasyOCR는 첫 실행 시 언어 모델을 내려받을 수 있으므로 인터넷 연결이 필요할 수 있습니다.

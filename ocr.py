@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -29,6 +30,7 @@ class OCRResult:
     method: str = ""
     variant_scores: dict[str, tuple[float, int, int]] = field(default_factory=dict)
     low_confidence_words: list[str] = field(default_factory=list)
+    variants: dict[str, list[OCRItem]] = field(default_factory=dict)
 
 
 class OCRService:
@@ -81,10 +83,41 @@ class OCRService:
             self.logger.info("OCR variant [%s]: confidence=%.3f, characters=%s, length=%s", method, *score)
             variant = next(result for result in results if result.method == method)
             self.logger.info("OCR variant text [%s]: %s", method, variant.text)
+        if self.config.debug_mode:
+            self._save_variant_results(results)
         selected = max(results, key=lambda value: scores[value.method])
         merged_text, merged_confidence, low_words = self._merge_words(results, selected)
         self.logger.info("Selected OCR variant: %s (confidence=%.3f)", selected.method, selected.average_confidence)
-        return OCRResult(selected.items, merged_text, merged_confidence, selected.method, scores, low_words)
+        all_variants = {result.method: result.items for result in results}
+        return OCRResult(selected.items, merged_text, merged_confidence, selected.method, scores, low_words,
+                         all_variants)
+
+    def _save_variant_results(self, results: list[OCRResult]) -> None:
+        """Persist every OCR region as JSON during debug sessions."""
+        payload = [{
+            "preprocessing": result.method,
+            "text": result.text,
+            "average_confidence": result.average_confidence,
+            "regions": [{"text": item.text, "confidence": item.confidence, "box": item.box}
+                        for item in result.items],
+        } for result in results]
+        try:
+            path = self.config.debug_dir / "ocr_results.json"
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            self.logger.info("All OCR results saved: %s", path)
+        except OSError:
+            self.logger.exception("Could not save OCR debug results")
+
+    @staticmethod
+    def confidence_level(confidence: float) -> str:
+        """Classify confidence for diagnostics and Gemini restoration guidance."""
+        if confidence >= 0.80:
+            return "trusted"
+        if confidence >= 0.60:
+            return "medium"
+        if confidence >= 0.40:
+            return "low"
+        return "very_low"
 
     @staticmethod
     def _character_count(text: str) -> int:
