@@ -32,11 +32,13 @@ class Config:
     min_ocr_characters: int = 20
     ocr_languages: tuple[str, ...] = ("ko", "en")
     ocr_gpu: bool = False
+    ocr_upscale_factor: int = 3
+    superres_model_path: Path = field(default_factory=lambda: Path("models/FSRCNN_x3.pb"))
     debug_mode: bool = DEBUG_MODE  # Modified: controls diagnostic log output.
     tts_rate: int = 165
     tts_voice_gender: str = "female"  # "female", "male", or "default"
     use_ai: bool = True
-    ai_provider: str = os.getenv("AI_PROVIDER", "openai").lower()
+    ai_provider: str = os.getenv("AI_PROVIDER", "gemini").lower()
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
